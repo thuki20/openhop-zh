@@ -1,0 +1,45 @@
+name: Build macOS (zh-CN)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: macOS installer (Simplified Chinese)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      # universal = Apple 芯片 + Intel 都能装
+      - name: Build universal dmg
+        working-directory: app
+        shell: bash
+        run: |
+          npm ci
+          npx tauri build --target universal-apple-darwin
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenHop-macOS-zh
+          path: |
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
