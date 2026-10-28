@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>OpenHop</title>
+  <style>
+    /* The island is always black, like the notch it lives around. */
+    :root {
+      --ink: #f5f5f7;
+      --soft: rgba(235, 235, 245, .62);
+      --faint: rgba(235, 235, 245, .32);
+      --glass: rgba(255, 255, 255, .085);
+      --glass-hi: rgba(255, 255, 255, .15);
+      --accent: #0a84ff;
+      --focus: #5e5ce6;
+      --good: #30d158;
+      --warn: #ff9f0a;
+      --bad: #ff453a;
+      --spring: cubic-bezier(.32, 1.35, .45, 1);
+      --ease: cubic-bezier(.25, .9, .3, 1);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, Ubuntu, Cantarell, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      color: var(--ink);
+    }
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none; -webkit-user-select: none; cursor: default; }
+    button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .island {
+      position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+      width: var(--w, 210px); height: var(--h, 34px);
+      background: #000; overflow: hidden;
+      border-radius: 0 0 var(--r, 17px) var(--r, 17px);
+      transition: width .34s var(--morph, var(--spring)), height .34s var(--morph, var(--spring)), border-radius .34s var(--ease);
+      will-change: width, height;
+    }
+    body.floating .island { border-radius: var(--r, 17px); }
+    /* Hanging from the top edge like a notch: concave shoulders blend it in. */
+    .shoulder { position: absolute; top: 0; width: 12px; height: 12px; display: none; pointer-events: none;
+      transition: left .34s var(--morph, var(--spring)), right .34s var(--morph, var(--spring)); }
+    body.attached:not(.notch) .shoulder { display: block; }
+    body.lip .shoulder { display: none; }
+    .shoulder.l { right: calc(50% + var(--w, 210px) / 2); background: radial-gradient(circle at 0 100%, transparent 11.5px, #000 12px); }
+    .shoulder.r { left: calc(50% + var(--w, 210px) / 2); background: radial-gradient(circle at 100% 100%, transparent 11.5px, #000 12px); }
+    /* Resting as a thin lip (Windows, Linux): out of the way of tabs and title bars. */
+    body.lip .island:not(.open):not(.activity):not(.live) { background: rgba(0, 0, 0, .78); }
+    body.lip .rest { display: none; }
+    /* In its own lane: a slim, always-visible pill with a soft shadow. */
+    body.lane .rest { height: var(--h); font-size: 12px; }
+    body.lane .rest { justify-content: center; }
+    body.small .rest { height: var(--h); font-size: 11.5px; padding: 0 12px; }
+    /* Around a MacBook notch: the middle is the camera, content goes either side. */
+    body.notch .rest .where span, body.notch .rest #restName { display: none; }
+    body.notch .rest { justify-content: space-between; padding: 0 10px; }
+
+    /* ---- at rest: a slim pill with live hints ---- */
+    .rest {
+      position: absolute; inset: 0 0 auto 0; height: 34px; padding: 0 14px;
+      display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; letter-spacing: -.01em;
+      transition: opacity .2s var(--ease), transform .3s var(--ease);
+    }
+    .rest .where { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+    .rest .where span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--soft); }
+    .rest .where b { font-weight: 600; color: var(--ink); white-space: nowrap; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); flex: none; box-shadow: 0 0 8px color-mix(in srgb, var(--good) 70%, transparent); }
+    .dot.off { background: #636366; box-shadow: none; }
+    .hints { display: flex; gap: 6px; align-items: center; }
+    .hints svg { width: 15px; height: 15px; display: block; }
+    .hint-focus { color: #a5a3ff; }
+    .hint-batt { color: var(--warn); }
+    .ring-progress { width: 15px; height: 15px; transform: rotate(-90deg); }
+    .ring-progress circle { fill: none; stroke-width: 2.5; }
+    .open .rest, .activity .rest, .live .rest { opacity: 0; transform: scale(.92); pointer-events: none; }
+
+    /* ---- compact live pill: a transfer, the song, Focus ---- */
+    .compact { position: absolute; inset: 0; display: flex; align-items: center; gap: 10px; padding: 0 9px 0 9px; font-size: 12.5px; font-weight: 600;
+      opacity: 0; transform: scale(.9); transition: opacity .2s var(--ease), transform .45s var(--spring); pointer-events: none; }
+    .island.live .compact { opacity: 1; transform: none; transition-delay: .08s; pointer-events: auto; }
+    .c-left, .c-right { display: flex; align-items: center; gap: 8px; min-width: 0; flex: none; }
+    .c-mid { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+    .c-mid small { color: var(--soft); font-weight: 500; margin-left: 4px; }
+    body.notch .c-mid { visibility: hidden; }
+    body.notch .c-left, body.notch .c-right { width: 100px; }
+    body.notch .c-right { justify-content: flex-end; }
+    .c-art { width: 22px; height: 22px; border-radius: 6px; background: #333 center / cover; flex: none; }
+    .c-ico { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; flex: none; }
+    .c-ico svg { width: 14px; height: 14px; }
+    .c-ico.files { background: color-mix(in srgb, var(--accent) 28%, transparent); color: #8cc8ff; }
+    .c-ico.focus { background: color-mix(in srgb, var(--focus) 35%, transparent); color: #b3b1ff; }
+    .c-ico.battery { background: color-mix(in srgb, var(--bad) 25%, transparent); color: var(--bad); }
+    .c-ico.copied { background: color-mix(in srgb, var(--good) 28%, transparent); color: var(--good); }
+    .c-app { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; flex: none; color: #fff; font-weight: 700; font-size: 12px; }
+    /* The Open tab's task list */
+    .sect { font-size: 11.5px; font-weight: 600; color: var(--faint); margin: 12px 9px 4px; }
+    .sect:first-child { margin-top: 2px; }
+    .lead.app.running { position: relative; overflow: visible; }
+    .lead.app.running::after { content: ""; position: absolute; bottom: -5px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--soft); }
+    .qbtn { min-width: 26px; height: 26px; padding: 0 6px; border-radius: 13px; display: grid; place-items: center; color: var(--soft); font-size: 12px; font-weight: 600; white-space: nowrap;
+      transition: background .2s, color .2s, padding .25s var(--spring); }
+    .row .tail .qbtn { width: auto; border-radius: 13px; }
+    .qbtn:hover { background: var(--glass-hi); color: var(--ink); }
+    .qbtn svg { width: 12px; height: 12px; }
+    .qbtn.armed, .qbtn.force { background: var(--bad); color: #fff; padding: 0 11px; }
+    .row.leaving { opacity: .4; transition: opacity .4s; }
+    #appList { max-height: 340px; }
+    .c-tag { font-size: 12.5px; font-weight: 600; }
+    .c-tag.on { color: #a5a3ff; }
+    .c-tag.low { color: var(--bad); }
+    .ring { width: 22px; height: 22px; transform: rotate(-90deg); flex: none; }
+    .ring circle { fill: none; stroke-width: 2.6; }
+    .ring .track { stroke: rgba(255, 255, 255, .16); }
+    .ring .val { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .5s var(--ease); }
+    .ring.spin { animation: spin 1s linear infinite; }
+    .ring.spin .val { stroke-dashoffset: 40; }
+    @keyframes spin { to { transform: rotate(270deg); } }
+    .tick { width: 22px; height: 22px; border-radius: 50%; background: var(--good); display: grid; place-items: center; animation: pop .45s var(--spring); }
+    .tick svg { width: 13px; height: 13px; }
+    .tick path { stroke-dasharray: 20; stroke-dashoffset: 20; animation: draw .35s .12s var(--ease) forwards; }
+    @keyframes pop { from { transform: scale(.3); opacity: 0; } }
+    @keyframes draw { to { stroke-dashoffset: 0; } }
+
+    /* Sound bars: dance while playing, rest flat when paused. */
+    .wave { display: flex; align-items: center; gap: 2.5px; height: 16px; flex: none; }
+    .wave i { display: block; width: 3px; height: 100%; border-radius: 2px; background: var(--wave, #fff); transform: scaleY(.25); transform-origin: 50% 50%; transition: transform .3s; }
+    .wave.on i { animation: bar 1.05s ease-in-out infinite; }
+    .wave.on i:nth-child(2) { animation-duration: .8s; animation-delay: -.3s; }
+    .wave.on i:nth-child(3) { animation-duration: 1.2s; animation-delay: -.5s; }
+    .wave.on i:nth-child(4) { animation-duration: .9s; animation-delay: -.2s; }
+    .wave.on i:nth-child(5) { animation-duration: 1.1s; animation-delay: -.7s; }
+    .wave.on i:nth-child(6) { animation-duration: .75s; animation-delay: -.4s; }
+    @keyframes bar { 0%, 100% { transform: scaleY(.25); } 50% { transform: scaleY(1); } }
+    .c-right .wave { height: 14px; gap: 2px; }
+    .c-right .wave i { width: 2.5px; }
+
+    /* ---- media player (Home tab) ---- */
+    .player { margin: 2px 0 16px; padding: 14px; border-radius: 22px; background: var(--glass); position: relative; overflow: hidden; }
+    /* A soft wash of the cover's colour (a gradient: blurring is slow to draw). */
+    .player::before { content: ""; position: absolute; inset: 0; background: var(--tint, transparent); opacity: .5; pointer-events: none; transition: background .6s; }
+    .player > * { position: relative; }
+    .p-top { display: flex; align-items: center; gap: 13px; }
+    .art { width: 58px; height: 58px; border-radius: 13px; background: #2c2c2e center / cover; flex: none; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); display: grid; place-items: center; color: var(--soft); }
+    .art svg { width: 26px; height: 26px; }
+    .p-meta { flex: 1; min-width: 0; }
+    .p-title { font-size: 15px; font-weight: 700; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .p-artist { font-size: 13px; color: var(--soft); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .p-time { display: flex; align-items: center; gap: 10px; margin-top: 13px; font-size: 11px; color: var(--soft); font-variant-numeric: tabular-nums; }
+    .p-time span { width: 34px; }
+    .p-time span:last-child { text-align: right; }
+    .bar { flex: 1; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, .18); position: relative; cursor: default; transition: height .2s var(--ease); }
+    .bar:hover { height: 8px; }
+    .bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: inherit; background: var(--ink); width: 0; }
+    .p-ctl { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; padding: 0 4px; }
+    .p-ctl button { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; color: var(--ink); transition: transform .25s var(--spring), background .15s; }
+    .p-ctl button:hover { background: var(--glass); }
+    .p-ctl button:active { transform: scale(.86); }
+    .p-ctl button svg { width: 22px; height: 22px; }
+    .p-ctl .big svg { width: 30px; height: 30px; }
+    #pShuffle { color: var(--soft); }
+    #pShuffle.on { color: var(--accent); }
+    #pShuffle svg { width: 18px; height: 18px; }
+    .p-ctl .where { width: auto; max-width: 120px; height: 26px; padding: 0 10px; border-radius: 999px; background: rgba(255, 255, 255, .1); font-size: 11px; font-weight: 600; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; line-height: 26px; }
+
+    /* ---- a live activity: one line or two, for a few seconds ---- */
+    .act {
+      position: absolute; left: 0; right: 0; top: 0; height: 76px; padding: 0 20px;
+      display: flex; align-items: center; gap: 12px; opacity: 0; transform: translateY(-6px) scale(.97);
+      transition: opacity .25s var(--ease) .08s, transform .4s var(--spring) .05s; pointer-events: none;
+    }
+    .activity .act { opacity: 1; transform: none; pointer-events: auto; }
+    .act .badge { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: none; background: var(--glass-hi); }
+    .act .badge svg { width: 20px; height: 20px; }
+    .act .badge.battery { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+    .act .badge.focus { background: color-mix(in srgb, var(--focus) 30%, transparent); color: #b3b1ff; }
+    .act .badge.files { background: color-mix(in srgb, var(--accent) 25%, transparent); color: #7cc0ff; }
+    .act .txt { min-width: 0; flex: 1; }
+    .act .t { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -.015em; }
+    .act .b { font-size: 12.5px; color: var(--soft); margin-top: 1px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .act .acts { display: flex; gap: 6px; }
+    .chip { font-size: 12.5px; font-weight: 600; padding: 6px 12px; border-radius: 999px; background: var(--glass-hi); white-space: nowrap; }
+    .chip:hover { background: rgba(255, 255, 255, .22); }
+    .chip.primary { background: var(--accent); }
+
+    /* ---- open: Control Center ---- */
+    .panel {
+      position: absolute; top: 0; left: 50%; width: 520px; margin-left: -260px; padding: 16px 20px 20px; box-sizing: border-box;
+      opacity: 0; transform: scale(.94) translateY(-10px); transform-origin: 50% 0;
+      transition: opacity .18s var(--ease), transform .4s var(--spring); pointer-events: none;
+    }
+    .panel { max-height: 760px; overflow-y: auto; scrollbar-width: none; }
+    .panel::-webkit-scrollbar { display: none; }
+    .open .panel { opacity: 1; transform: none; pointer-events: auto; transition-delay: .06s; }
+    /* Below a MacBook notch. */
+    body.notch .panel { padding-top: calc(var(--notch-h, 0px) + 8px); }
+    body.notch .act { top: var(--notch-h, 0px); }
+    body.attached .panel { padding-top: 12px; }
+
+    .head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .status { margin: 0 2px 14px; font-size: 12.5px; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* Segmented control: a thumb that glides between the tabs. */
+    .seg { position: relative; flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); background: var(--glass); border-radius: 10px; padding: 2px; }
+    .seg button { position: relative; z-index: 1; font-size: 12.5px; font-weight: 600; color: var(--soft); height: 28px; border-radius: 8px; transition: color .2s; }
+    .seg button[aria-selected="true"] { color: var(--ink); }
+    .seg button:not([aria-selected="true"]):hover { color: var(--ink); }
+    .seg-thumb { position: absolute; top: 2px; bottom: 2px; left: 2px; width: calc((100% - 4px) / 4); border-radius: 8px; background: rgba(255, 255, 255, .17);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .35); transition: transform .38s var(--spring); }
+
+    .view { display: none; }
+    .view.on { display: block; animation: viewIn .32s var(--ease); }
+    @keyframes viewIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .foot { margin: 12px 2px 0; font-size: 11.5px; color: var(--faint); line-height: 1.4; }
+
+    .search { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border-radius: 11px; background: var(--glass); margin-bottom: 10px; }
+    .search:focus-within { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 85%, transparent); }
+    .search svg { width: 15px; height: 15px; color: var(--faint); display: block; }
+    .search input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--ink); font: inherit; font-size: 13.5px; }
+    .search input::placeholder { color: var(--faint); }
+
+    .list { max-height: 296px; overflow-y: auto; margin: 0 -6px; padding: 0 6px; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.2) transparent; }
+    .row { box-sizing: border-box; display: flex; align-items: center; gap: 11px; width: 100%; text-align: left; padding: 8px 9px; border-radius: 12px; position: relative; }
+    .row:hover, .row.sel { background: var(--glass); }
+    .row.sel { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12); }
+    .row .lead { width: 34px; height: 34px; border-radius: 9px; flex: none; display: grid; place-items: center; background: var(--glass-hi); color: var(--soft); overflow: hidden; }
+    .row .lead svg { width: 17px; height: 17px; }
+    .row .lead img { width: 100%; height: 100%; object-fit: cover; }
+    .row .lead.app { color: #fff; font-weight: 700; font-size: 15px; }
+    .row .lead.app.has-icon { background: transparent; border-radius: 0; overflow: visible; }
+    .row .lead.app.has-icon img { width: 100%; height: 100%; object-fit: contain; }
+    .row .body { flex: 1; min-width: 0; }
+    .row .main { font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+    .apps .row .main { -webkit-line-clamp: 1; font-weight: 600; }
+    .row .meta { font-size: 11px; color: var(--faint); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row .tail { display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
+    .row:hover .tail, .row.sel .tail, .row .tail .on { opacity: 1; }
+    .row .tail button { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; color: var(--soft); }
+    .row .tail button:hover { background: var(--glass-hi); color: var(--ink); }
+    .row .tail button.on { color: var(--warn); }
+    .row .tail svg { width: 14px; height: 14px; }
+    .row .where { font-size: 11px; color: var(--soft); padding: 3px 8px; border-radius: 999px; background: var(--glass); white-space: nowrap; flex: none; }
+    .row.done { animation: done .5s var(--ease); }
+    @keyframes done { 40% { background: color-mix(in srgb, var(--good) 30%, transparent); } }
+
+    .chips { display: flex; gap: 6px; margin-bottom: 8px; overflow-x: auto; scrollbar-width: none; }
+    .chips button { font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 999px; background: var(--glass); color: var(--soft); white-space: nowrap; }
+    .chips button.on { background: var(--ink); color: #000; }
+
+    .shelf { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; min-height: 120px; }
+    .tile { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 6px 10px; border-radius: 16px; background: var(--glass); text-align: center; }
+    .tile:hover { background: var(--glass-hi); }
+    .tile .doc { width: 38px; height: 46px; border-radius: 6px 12px 6px 6px; display: grid; place-items: center; font-size: 10px; font-weight: 800; letter-spacing: .02em; color: #fff; }
+    .tile .n { font-size: 12px; font-weight: 600; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tile .o { font-size: 10.5px; color: var(--faint); width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tile .x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border-radius: 50%; background: #3a3a3c; color: var(--ink); display: grid; place-items: center; opacity: 0; transform: scale(.7); transition: opacity .15s, transform .25s var(--spring); }
+    .tile:hover .x { opacity: 1; transform: none; }
+    .tile .x svg { width: 10px; height: 10px; }
+    .tile.busy { animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .55; } }
+    .shelf .blank { grid-column: 1 / -1; display: grid; place-items: center; gap: 8px; border: 1.5px dashed rgba(255, 255, 255, .18); border-radius: 18px; padding: 22px 10px; color: var(--soft); font-size: 12.5px; text-align: center; }
+    .shelf .blank svg { width: 26px; height: 26px; color: var(--faint); }
+
+    body.dropping .head { display: none; }
+    .drop-title { margin: 6px 2px 2px; font-size: 17px; font-weight: 700; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; }
+    .target { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px 12px; border-radius: 18px; background: var(--glass); font-size: 12.5px; font-weight: 600;
+      transition: transform .3s var(--spring), background .2s, box-shadow .2s; }
+    .target svg { width: 30px; height: 30px; color: var(--soft); transition: color .2s; }
+    .target.hot { background: color-mix(in srgb, var(--accent) 32%, transparent); transform: scale(1.06); box-shadow: inset 0 0 0 1.5px var(--accent); }
+    .target.hot svg { color: #fff; }
+    .target.landed { animation: landed .42s var(--spring) forwards; background: color-mix(in srgb, var(--accent) 45%, transparent); }
+    .target.landed svg { color: #fff; }
+    .target.away { opacity: 0; transform: scale(.85) translateY(-6px); transition: opacity .25s var(--ease), transform .3s var(--ease); }
+    @keyframes landed { 0% { transform: scale(1.06); } 35% { transform: scale(1.14); } 100% { transform: scale(.6) translateY(-30px); opacity: 0; } }
+    .pc { text-align: left; color: inherit; }
+    .pc.go { cursor: default; }
+    .pc.go:hover { background: var(--glass-hi); }
+    .iconbtn { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--glass); color: var(--soft); }
+    .iconbtn:hover { background: var(--glass-hi); color: var(--ink); }
+    .iconbtn svg { width: 16px; height: 16px; }
+
+    /* Quick actions: small, next to the status, only those switched on. */
+    .statusrow { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; min-height: 30px; }
+    .statusrow .status { flex: 1; min-width: 0; margin: 0 2px; }
+    .quick { display: flex; gap: 6px; flex: none; }
+    .qk { width: 30px; height: 30px; padding: 0; border-radius: 50%; display: grid; place-items: center; background: var(--glass); color: var(--soft); position: relative;
+      transition: background .2s var(--ease), color .2s, transform .25s var(--spring), width .25s var(--ease); }
+    .qk .disc { display: grid; place-items: center; width: 100%; height: 100%; }
+    .qk svg { width: 15px; height: 15px; display: block; }
+    .qk .lbl { display: none; }
+    .qk:hover { background: var(--glass-hi); color: var(--ink); }
+    .qk:active { transform: scale(.9); }
+    .qk.on { background: var(--focus); color: #fff; }
+    .qk.armed { background: var(--bad); color: #fff; }
+    .qk[hidden] { display: none; }
+    .offs { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 12px; }
+    .offs:empty { display: none; }
+    .off { font-size: 10.5px; color: var(--soft); background: var(--glass); border-radius: 999px; padding: 3px 8px 3px 7px; display: inline-flex; align-items: center; gap: 5px; }
+    .off::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #8e8e93; }
+
+    /* Phone: a QR code to scan, then files both ways. */
+    .seg-thumb.none { opacity: 0; }
+    .phone { display: flex; gap: 16px; align-items: center; padding: 4px 2px 2px; }
+    .qr { width: 148px; height: 148px; flex: none; border-radius: 18px; background: #fff; padding: 8px; display: grid; place-items: center;
+      box-shadow: 0 0 0 1px rgba(255,255,255,.08); transition: transform .35s var(--spring), opacity .25s var(--ease); }
+    .qr img { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+    .qr.wait { opacity: .35; transform: scale(.96); }
+    .ph-txt { min-width: 0; flex: 1; }
+    .ph-txt .drop-title { margin-top: 0; }
+    .ph-state { display: flex; align-items: center; gap: 7px; margin: 4px 0 8px; font-size: 13px; color: var(--soft); }
+    .ph-state i { width: 7px; height: 7px; border-radius: 50%; background: #8e8e93; flex: none; transition: background .3s; }
+    .ph-state.on { color: var(--ink); }
+    .ph-state.on i { background: var(--good); box-shadow: 0 0 0 3px rgba(48,209,88,.22); }
+    .ph-tip { font-size: 11.5px; color: var(--faint); line-height: 1.45; margin: 0; }
+    .ph-renew { margin-top: 10px; font-size: 11.5px; color: var(--soft); background: var(--glass); border-radius: 999px; padding: 4px 10px; }
+    .ph-renew:hover { color: var(--ink); background: var(--glass-hi); }
+    .ph-renew.armed { background: var(--bad); color: #fff; }
+    .qk.phone.on { background: var(--good); color: #fff; }
+    /* Remote help: a recording-style dot, and Stop. */
+    .c-ico.helped { background: rgba(255,59,48,.18); display: grid; place-items: center; }
+    .c-ico.helped .rec { width: 9px; height: 9px; border-radius: 50%; background: #ff3b30; animation: rec 1.6s ease-in-out infinite; }
+    @keyframes rec { 50% { opacity: .35; } }
+    .c-stop { background: #ff3b30; color: #fff; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 4px 11px; pointer-events: auto; }
+    .win .app.scr { background: var(--glass-hi); color: var(--ink); display: grid; place-items: center; }
+    .win .app.scr svg { width: 22px; height: 22px; }
+    .controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+    .ctl { display: flex; flex-direction: column; align-items: center; gap: 7px; font-size: 11.5px; color: var(--soft); }
+    .ctl .disc {
+      width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center; background: var(--glass);
+      transition: background .25s var(--ease), transform .3s var(--spring), color .25s;
+    }
+    .ctl .disc svg { width: 24px; height: 24px; }
+    .ctl:hover .disc { background: var(--glass-hi); }
+    .ctl:active .disc { transform: scale(.9); }
+    .ctl.on .disc { background: var(--focus); color: #fff; }
+    .ctl.on { color: var(--ink); }
+    .ctl.armed .disc { background: var(--bad); color: #fff; }
+
+    .section { font-size: 12px; color: var(--faint); margin: 0 2px 8px; font-weight: 600; }
+    .pcs { display: flex; gap: 10px; overflow-x: auto; margin-bottom: 16px; scrollbar-width: none; }
+    .pcs::-webkit-scrollbar { display: none; }
+    .pc {
+      flex: 1 0 140px; max-width: 220px; background: var(--glass); border-radius: 18px; padding: 12px 13px; box-sizing: border-box; position: relative;
+    }
+    .pc.here { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 80%, transparent); }
+    .pc .top { display: flex; align-items: center; gap: 8px; }
+    .pc .top svg { width: 20px; height: 20px; color: var(--soft); flex: none; }
+    .pc .name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -.015em; }
+    .pc .state { font-size: 11.5px; color: var(--soft); margin-top: 8px; display: flex; align-items: center; gap: 6px; min-height: 16px; white-space: nowrap; }
+    .pc .state .batt { margin-left: auto; }
+    .pc .state .pointer { color: #7cc0ff; }
+    .batt { display: inline-flex; align-items: center; gap: 5px; }
+    .batt .cell { width: 24px; height: 12px; border-radius: 3.5px; border: 1.5px solid rgba(235, 235, 245, .45); position: relative; box-sizing: border-box; padding: 1.5px; }
+    .batt .cell::after { content: ""; position: absolute; right: -4px; top: 3px; width: 2px; height: 4px; border-radius: 0 1px 1px 0; background: rgba(235, 235, 245, .45); }
+    .batt .fill { display: block; height: 100%; border-radius: 1.5px; background: var(--ink); transition: width .6s var(--ease); }
+    .batt.low .fill { background: var(--warn); }
+    .batt.crit .fill { background: var(--bad); }
+    .batt.charging .fill { background: var(--good); }
+    .disk { margin-top: 8px; }
+    .disk .bar { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .12); overflow: hidden; }
+    .disk .bar i { display: block; height: 100%; background: var(--soft); border-radius: 2px; }
+    .disk small { display: block; font-size: 11px; color: var(--faint); margin-top: 4px; }
+
+    .wins { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+    .wins::-webkit-scrollbar { display: none; }
+    .win { flex: none; width: 92px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 4px; border-radius: 14px; }
+    .win:hover { background: var(--glass); }
+    .win .app { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; font-weight: 700; font-size: 16px; color: #fff; }
+    .win .n { font-size: 11px; color: var(--soft); width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .win .o { font-size: 10px; color: var(--faint); }
+    .empty { font-size: 12px; color: var(--faint); padding: 4px 2px 0; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .island, .rest, .act, .panel, .ctl .disc, .seg-thumb, .target, .tile .x, .compact, .bar, .ring .val { transition-duration: .01s !important; transition-delay: 0s !important; }
+      .wave.on i, .ring.spin, .tick, .tick path { animation: none !important; }
+      .tick path { stroke-dashoffset: 0; }
+      .view.on, .row.done, .tile.busy { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <i class="shoulder l"></i><i class="shoulder r"></i>
+  <div class="island" id="island">
+    <div class="rest" id="rest">
+      <div class="where"><i class="dot" id="dot"></i><b id="restName">OpenHop</b><span id="restSub"></span></div>
+      <div class="hints" id="hints"></div>
+    </div>
+    <div class="act" id="act">
+      <div class="badge" id="actBadge"></div>
+      <div class="txt"><div class="t" id="actTitle"></div><div class="b" id="actBody"></div></div>
+      <div class="acts" id="actButtons"></div>
+    </div>
+    <div class="compact" id="compact" aria-live="polite">
+      <div class="c-left" id="cLeft"></div>
+      <div class="c-mid" id="cMid"></div>
+      <div class="c-right" id="cRight"></div>
+    </div>
+    <div class="panel" id="panel">
+      <div class="head">
+        <div class="seg" id="tabs" role="tablist">
+          <i class="seg-thumb" id="segThumb"></i>
+          <button role="tab" data-tab="home">首页</button>
+          <button role="tab" data-tab="clips">剪贴板</button>
+          <button role="tab" data-tab="shelf">暂存架</button>
+          <button role="tab" data-tab="open">Open</button>
+        </div>
+        <button class="iconbtn" id="openApp" title="打开 OpenHop" aria-label="打开 OpenHop"></button>
+      </div>
+
+      <section class="view" data-view="home">
+        <div class="player" id="player" hidden>
+          <div class="p-top">
+            <div class="art" id="pArt"></div>
+            <div class="p-meta"><div class="p-title" id="pTitle"></div><div class="p-artist" id="pArtist"></div></div>
+            <div class="wave" id="pWave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          </div>
+          <div class="p-time"><span id="pPos">0:00</span><div class="bar" id="pBar" role="slider" aria-label="位置"><i id="pFill"></i></div><span id="pDur">0:00</span></div>
+          <div class="p-ctl">
+            <button id="pShuffle" title="随机播放" aria-label="随机播放"></button>
+            <button id="pPrev" title="上一首" aria-label="上一首"></button>
+            <button class="big" id="pPlay" title="播放或暂停" aria-label="播放或暂停"></button>
+            <button id="pNext" title="下一首" aria-label="下一首"></button>
+            <button class="where" id="pWhere"></button>
+          </div>
+        </div>
+        <div class="statusrow">
+          <p class="status" id="headSub"></p>
+          <div class="quick">
+            <button class="qk phone" id="cPhone" aria-label="手机"><span class="disc"></span><span class="lbl">手机</span></button>
+            <button class="qk" id="cFocus" aria-label="专注"><span class="disc"></span><span class="lbl">专注</span></button>
+            <button class="qk" id="cLock" aria-label="全部锁定"><span class="disc"></span><span class="lbl">全部锁定</span></button>
+            <button class="qk" id="cSleep" aria-label="全部睡眠"><span class="disc"></span><span class="lbl">全部睡眠</span></button>
+          </div>
+        </div>
+        <div class="offs" id="offs"></div>
+        <div class="pcs" id="pcs"></div>
+        <div class="section" id="winsTitle">其他电脑的屏幕与窗口</div>
+        <div class="wins" id="wins"></div>
+      </section>
+
+      <section class="view" data-view="clips">
+        <label class="search"><span id="clipGlass"></span><input id="clipQuery" placeholder="搜索复制过的内容" spellcheck="false" autocomplete="off"></label>
+        <div class="list" id="clipList"></div>
+        <p class="foot">点选一条即可在任何电脑上再次复制。在 Island 上按 C 可回到这里。</p>
+      </section>
+
+      <section class="view" data-view="shelf">
+        <div class="shelf" id="shelfGrid"></div>
+        <p class="foot">把文件拖到 Island 上即可存放在这里。点选来自其他电脑的文件可复制到本机。</p>
+      </section>
+
+      <section class="view" data-view="open">
+        <label class="search"><span id="openGlass"></span><input id="appQuery" placeholder="在任意电脑上打开应用" spellcheck="false" autocomplete="off"></label>
+        <div class="chips" id="appWhere"></div>
+        <div class="list apps" id="appList"></div>
+        <p class="foot">每台电脑已打开的应用、后台运行的应用以及全部应用。点选即可切换或打开（指针跟随）；✕ 退出该应用。</p>
+      </section>
+
+      <section class="view" data-view="phone">
+        <div class="phone">
+          <div class="qr wait" id="qrBox"><img id="qrImg" alt="手机扫码用的二维码"></div>
+          <div class="ph-txt">
+            <h2 class="drop-title">你的手机</h2>
+            <div class="ph-state" id="phState"><i></i><span id="phStateText">启动中…</span></div>
+            <p class="ph-tip" id="phTip">用 iPhone 或安卓手机的相机对准这个二维码。手机需连接同一个 Wi‑Fi。</p>
+            <button class="ph-renew" id="phRenew">换新码</button>
+          </div>
+        </div>
+        <p class="foot">从手机发送的文件会存到「下载 › OpenHop」，也可发到任意电脑、所有电脑或暂存架。手机上还能使用暂存架、剪贴板历史、音乐和触控板。</p>
+      </section>
+
+      <section class="view" data-view="drop">
+        <h2 class="drop-title" id="dropTitle">发送</h2>
+        <p class="status">拖到某台电脑上松手即发送给它，拖到其他位置松手则保留在暂存架。</p>
+        <div class="targets" id="dropTargets"></div>
+      </section>
+    </div>
+  </div>
+  <script src="island.js"></script>
+</body>
+</html>

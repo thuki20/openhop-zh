@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"","local":true,"windows":["main","toast","fx","dock","island","lane","view-*"],"permissions":["core:default","core:window:allow-start-dragging","core:window:allow-start-resize-dragging"]}}

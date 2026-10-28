@@ -1,0 +1,793 @@
+"use strict";
+
+const SERVER = "@server";
+const OS_LABEL = { Windows: "Windows", MacOs: "macOS", Linux: "Linux", Other: "Other" };
+const $ = (id) => document.getElementById(id);
+
+// In the desktop app this is Tauri's IPC; in a plain browser a demo mock (for UI work).
+const invoke = window.__TAURI__ ? window.__TAURI__.core.invoke : mockInvoke();
+
+let snap = null;      // last snapshot from the backend
+let form = null;      // editable copy of the config
+let dirty = false;
+let dragging = null;
+let learning = null;  // arranging by moving the mouse
+
+// ------------------------------------------------------------------ helpers
+
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k === "style") n.style.cssText = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) n.append(k);
+  return n;
+}
+
+function setDirty(v) {
+  dirty = v;
+  $("save").disabled = !v;
+  $("saveNote").textContent = v && snap?.status?.running ? "保存会短暂重启共享。" : "";
+}
+
+// ------------------------------------------------------------------ settings form
+
+function fillForm(cfg) {
+  form = structuredClone(cfg);
+  $("name").value = form.name;
+  $("passphrase").value = form.passphrase;
+  $("serverAddr").value = form.server_addr || "";
+  $("speed").value = String(form.transfer_limit_mbps || 0);
+  renderRole();
+  fillPrefs(cfg);
+}
+
+// ------------------------------------------------------------------ instant settings
+
+const PREF_ACCENTS = ["blue", "purple", "pink", "orange", "green", "graphite"];
+
+function fillPrefs(cfg) {
+  renderLook(cfg.ui_accent);
+  for (const box of document.querySelectorAll("#perms input[data-pref]")) box.checked = cfg[box.dataset.pref] !== false;
+}
+// Sharing switches apply at once.
+for (const box of document.querySelectorAll("#perms input[data-pref]")) {
+  box.addEventListener("change", () => setPref({ [box.dataset.pref]: box.checked }));
+}
+
+function renderLook(accent) {
+  const box = $("accents");
+  if (!box.children.length) {
+    for (const a of PREF_ACCENTS) {
+      const col = window.OpenHopTheme.ACCENTS[a][0];
+      box.append(el("button", { type: "button", role: "radio", "aria-label": a, title: a[0].toUpperCase() + a.slice(1), style: `background:${col}`, "data-accent": a,
+        onclick: () => setPref({ ui_accent: a }) }));
+    }
+  }
+  for (const b of box.children) b.setAttribute("aria-checked", String(b.dataset.accent === accent));
+  window.OpenHopTheme.apply(null, accent, snap ? snap.system_dark : undefined);
+}
+
+async function setPref(patch) {
+  Object.assign(form, patch);
+  if (snap) Object.assign(snap.config, patch);
+  renderLook(form.ui_accent);
+  try { await invoke("update_prefs", { prefs: patch }); } catch (e) { showBanner(String(e)); }
+}
+
+$("openDock").addEventListener("click", () => invoke("dock_toggle"));
+
+// General | Look tabs (the selected background slides across).
+for (const [i, t] of [...document.querySelectorAll("#tabs button")].entries()) {
+  t.addEventListener("click", () => {
+    $("tabs").style.setProperty("--tab", i);
+    for (const o of document.querySelectorAll("#tabs button")) {
+      const on = o === t;
+      o.classList.toggle("on", on);
+      o.setAttribute("aria-selected", String(on));
+      $("pane-" + o.dataset.tab).hidden = !on;
+    }
+  });
+}
+
+// Every computer can use the others' screens. Internally one of them keeps
+// the group together (the "hub": the others connect to it); that's decided
+// when computers are paired, not chosen here.
+function renderRole() {
+  const role = snap?.status?.role || form.role;
+  document.body.classList.toggle("role-server", role === "server");
+  document.body.classList.toggle("role-client", role === "client");
+}
+
+function readForm() {
+  form.name = $("name").value.trim() || form.name;
+  form.passphrase = $("passphrase").value;
+  form.server_addr = $("serverAddr").value.trim() || null;
+  form.transfer_limit_mbps = parseInt($("speed").value, 10) || 0;
+}
+
+for (const id of ["name", "passphrase", "serverAddr", "speed"]) {
+  $(id).addEventListener("input", () => { readForm(); setDirty(true); });
+}
+$("reveal").addEventListener("click", () => {
+  const p = $("passphrase");
+  const show = p.type === "password";
+  p.type = show ? "text" : "password";
+  $("reveal").textContent = show ? "Hide" : "Show";
+});
+
+$("save").addEventListener("click", async () => {
+  readForm();
+  try {
+    await invoke("save_config", { config: form, restart: true });
+    setDirty(false);
+    await refresh();
+  } catch (e) {
+    showBanner(String(e));
+  }
+});
+
+$("power").addEventListener("change", async () => {
+  try {
+    if (snap?.status?.running) {
+      await invoke("stop");
+    } else {
+      if (dirty) {
+        readForm();
+        await invoke("save_config", { config: form, restart: false });
+        setDirty(false);
+      }
+      await invoke("start");
+    }
+  } catch (e) {
+    showBanner(String(e));
+  }
+  await refresh();
+});
+
+// ------------------------------------------------------------------ banner
+
+function showBanner(text, action) {
+  const b = $("banner");
+  b.replaceChildren(text);
+  if (action) b.append(el("button", { class: "link", onclick: action.run }, action.label));
+  b.hidden = false;
+}
+
+function renderBanner() {
+  const s = snap;
+  if (s.permission) {
+    return showBanner(s.permission, { label: "打开设置", run: () => invoke("request_permission") });
+  }
+  const err = s.error || s.status?.error;
+  if (err) return showBanner(err);
+  if (s.wayland) {
+    return showBanner("This Linux desktop runs Wayland: your other computers can use its screen, but its own keyboard and mouse can't hop to them. Log in with an Xorg session for that.");
+  }
+  $("banner").hidden = true;
+}
+
+// ------------------------------------------------------------------ layout grid
+
+function placeIn(layout, name, x, y) {
+  // Mirrors Layout::place in Rust: dropping onto an occupied cell swaps.
+  if (name === SERVER || (x === 0 && y === 0)) return layout;
+  const screens = layout.screens.filter((s) => s.name !== name);
+  const old = layout.screens.find((s) => s.name === name);
+  const i = screens.findIndex((s) => s.x === x && s.y === y);
+  if (i >= 0) {
+    const d = screens.splice(i, 1)[0];
+    if (old) screens.push({ name: d.name, x: old.x, y: old.y });
+  }
+  screens.push({ name, x, y });
+  return { screens };
+}
+
+function renderGrid() {
+  const st = snap.status;
+  const layout = st ? st.layout : form.layout;
+  const peers = new Map((st?.peers || []).map((p) => [p.name, p]));
+  const cells = [{ name: SERVER, x: 0, y: 0 }, ...layout.screens];
+  const xs = cells.map((c) => c.x), ys = cells.map((c) => c.y);
+  const x0 = Math.min(...xs) - 1, x1 = Math.max(...xs) + 1;
+  const y0 = Math.min(...ys) - 1, y1 = Math.max(...ys) + 1;
+
+  const grid = $("grid");
+  grid.style.gridTemplateColumns = `repeat(${x1 - x0 + 1}, minmax(56px, var(--cellw)))`;
+  grid.replaceChildren();
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const cell = el("div", { class: "cell" });
+      cell.dataset.x = x; cell.dataset.y = y;
+      const who = cells.find((c) => c.x === x && c.y === y);
+      if (who) cell.append(tile(who.name, peers, st));
+      grid.append(cell);
+    }
+  }
+}
+
+function tile(name, peers, st) {
+  // On a computer that joined another one's group, the arrangement is the
+  // hub's: the hub sits at the centre (SERVER) and this computer is a tile.
+  const joined = st?.role === "client";
+  const hub = joined ? (st.hub || st.peers?.[0]?.name || "") : "";
+  const self = joined ? name === form.name : name === SERVER;
+  const p = peers.get(name === SERVER ? hub : name);
+  const active = st?.running && (joined ? (self && st.active === form.name) : ((self && !st.active) || st.active === name));
+  const os = self ? snap.os : p?.os;
+  const offline = !joined && !self && !p;
+  const cls = ["tile", self ? "self" : "", os ? `os-${os}` : "", offline ? "offline" : "", active && peers.size ? "active" : ""].join(" ");
+  const screen = self ? st?.screen : p?.screen;
+  const label = self ? `${form.name} (this)` : name === SERVER ? hub : name;
+  const t = el("div", { class: cls },
+    el("span", { class: "os" }, OS_LABEL[os] || ""),
+    active && peers.size ? el("span", { class: "here", title: "光标在此" }) : null,
+    el("b", {}, label),
+    el("small", {}, screen && screen.w ? `${screen.w}×${screen.h}` : (self || joined ? "" : (st?.wakeable || []).includes(name) ? "Asleep" : "Offline")),
+  );
+  // The hub stays in the middle; everything else can be moved around it.
+  if (name !== SERVER) t.addEventListener("pointerdown", (e) => startDrag(e, t, name));
+  return t;
+}
+
+function startDrag(e, t, name) {
+  e.preventDefault();
+  const ghost = t.cloneNode(true);
+  ghost.classList.add("dragging");
+  document.body.append(ghost);
+  t.style.opacity = "0.25";
+  dragging = { name, ghost, over: null };
+  $("grid").classList.add("drag-on");
+  const move = (ev) => {
+    ghost.style.left = `${ev.clientX - 70}px`;
+    ghost.style.top = `${ev.clientY - 44}px`;
+    const under = document.elementFromPoint(ev.clientX, ev.clientY)?.closest(".cell");
+    if (dragging.over && dragging.over !== under) dragging.over.classList.remove("drop");
+    if (under) under.classList.add("drop");
+    dragging.over = under;
+  };
+  const up = async () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    ghost.remove();
+    $("grid").classList.remove("drag-on");
+    const target = dragging.over;
+    dragging = null;
+    if (target) {
+      target.classList.remove("drop");
+      const x = +target.dataset.x, y = +target.dataset.y;
+      const st = snap.status;
+      const current = st ? st.layout : form.layout;
+      const next = placeIn(current, name, x, y);
+      form.layout = next;
+      if (st) st.layout = next;
+      try { await invoke("set_layout", { layout: next }); } catch (err) { showBanner(String(err)); }
+    }
+    render();
+  };
+  move(e);
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
+// ------------------------------------------------------------------ status
+
+function renderStatus() {
+  const st = snap.status;
+  const running = !!st?.running;
+  $("power").checked = running;
+  const dot = $("statusDot");
+  dot.className = "dot " + (running ? (st.peers.length ? "on" : "busy") : "");
+  $("statusText").textContent = running ? st.message : "Off";
+
+  $("grid").hidden = false;
+  $("clientView").hidden = true;
+  $("stageTitle").textContent = "Arrangement";
+  if (!learning) $("stageHint").textContent = "Drag screens to match where they sit on your desk. Then move any computer's pointer off an edge to hop across, with its own keyboard.";
+  $("learnBtn").hidden = !(running && st.peers.length);
+  renderRole();
+}
+
+function renderNearby() {
+  const list = $("nearby");
+  const st = snap.status;
+  const items = st?.discovered || [];
+  const connected = new Set((st?.peers || []).map((p) => p.name));
+  const paired = new Set((st?.paired || []).map((p) => p.device));
+  list.replaceChildren();
+  if (!st?.running) {
+    list.append(el("div", { class: "item empty" }, "开启 OpenHop 以查找其他电脑。"));
+    return;
+  }
+  if (st.needs_pairing) {
+    list.append(el("div", { class: "hint-row" }, "选择一台你的电脑，然后输入它显示的配对码。"));
+  }
+  if (!items.length) {
+    list.append(el("div", { class: "item empty" }, "正在搜索… 在其他电脑上打开 OpenHop（同一网络，或用网线直连）。"));
+    return;
+  }
+  const initials = { MacOs: "MAC", Windows: "WIN", Linux: "LNX", Other: "PC" };
+  for (const d of items) {
+    const live = connected.has(d.name);
+    const isPaired = paired.has(d.device);
+    let right;
+    if (live) {
+      right = el("span", { class: "tag live" }, "Connected");
+    } else if (d.role === "server" && !isPaired) {
+      right = el("button", { class: "pill", onclick: () => openPair(d) }, "Add");
+    } else {
+      right = el("span", { class: "tag" }, isPaired ? "Paired" : "在另一个分组");
+    }
+    list.append(el("div", { class: "item" },
+      el("span", { class: `icon os-${d.os}` }, initials[d.os] || "PC"),
+      el("span", { class: "text" },
+        el("b", {}, d.name, d.link === "direct" ? el("span", { class: "badge-direct" }, "Cable") : null),
+        el("span", {}, `${OS_LABEL[d.os]} · ${d.link === "direct" ? "direct connection" : d.addr.replace(/:\d+$/, "").replace(/^\[|\]$/g, "")}`)),
+      right,
+    ));
+  }
+}
+
+// ------------------------------------------------------------------ nearby radar
+
+let radarKey = "";
+
+const ICONS = {
+  laptop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="11" rx="1.6"/><path d="M2 19h20"/></svg>',
+  desktop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.6"/><path d="M9 20h6M12 16v4"/></svg>',
+};
+function deviceIcon(os) {
+  const span = document.createElement("span");
+  span.className = "glyph";
+  span.innerHTML = os === "MacOs" ? ICONS.laptop : ICONS.desktop;
+  return span.firstChild;
+}
+
+function renderRadar() {
+  const st = snap.status;
+  const radar = $("radar");
+  const running = !!st?.running;
+  const items = (st?.discovered || []).slice().sort((a, b) => (a.device || a.name).localeCompare(b.device || b.name));
+  const connected = new Set((st?.peers || []).map((p) => p.name));
+  const paired = new Set((st?.paired || []).map((p) => p.device));
+  const isClient = (st?.role || form.role) === "client";
+  const state = (d) => connected.has(d.name) ? "live" : paired.has(d.device) ? "paired" : d.role === "server" ? "pair" : "seen";
+  const w = radar.clientWidth || 600;
+  const key = JSON.stringify([running, isClient, form.name, snap.os, w, items.map((d) => [d.device, d.name, d.os, d.role, state(d)])]);
+  if (key === radarKey) return;
+  radarKey = key;
+  radar.classList.toggle("idle", !running);
+  radar.querySelectorAll(".peer, .me, .caption, svg.links").forEach((n) => n.remove());
+  const h = 300, cx = w / 2, cy = h * 0.46;
+  const me = el("div", { class: "me", style: `top:${cy}px` }, el("div", { class: "avatar" }, deviceIcon(snap.os)), el("span", {}, form.name || "本机"));
+  radar.append(me);
+  const n = items.length;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "links");
+  radar.append(svg);
+  items.forEach((d, i) => {
+    // Spread around the orbit, starting top-right; alternate rings when busy.
+    const ring = n > 5 ? (i % 2 ? 132 : 86) : 116;
+    const angle = (-60 + (360 / Math.max(n, 1)) * i) * Math.PI / 180;
+    const x = cx + Math.cos(angle) * ring * 1.3;
+    // Keep names and buttons inside the card.
+    const y = Math.max(46, Math.min(h - 78, cy + Math.sin(angle) * ring * 0.78));
+    const s = state(d);
+    const label = s === "live" ? "Connected" : s === "paired" ? "Paired" : s === "pair" ? "点击连接" : d.role === "server" ? "Sharing" : "Nearby";
+    const node = el(s === "pair" ? "button" : "div", {
+      class: `peer os-${d.os} ${s}${s === "pair" ? " can-pair" : ""}`,
+      style: `left:${Math.round(x)}px;top:${Math.round(y)}px;animation-delay:${i * 70}ms`,
+      title: `${d.name} · ${OS_LABEL[d.os] || ""}`,
+    },
+      el("div", { class: "avatar" }, deviceIcon(d.os)),
+      el("span", { class: "nm" }, d.name),
+      el("span", { class: "st" + (s === "pair" ? " cta" : "") }, label));
+    if (s === "pair") node.addEventListener("click", () => openPair(d));
+    radar.append(node);
+    if (s === "live") {
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      // From this computer's edge to the other one's.
+      const dx = x - cx, dy = y - cy, len = Math.hypot(dx, dy) || 1;
+      line.setAttribute("x1", cx + dx / len * 40); line.setAttribute("y1", cy + dy / len * 40);
+      line.setAttribute("x2", x - dx / len * 34); line.setAttribute("y2", y - dy / len * 34);
+      svg.append(line);
+    }
+  });
+  const caption = !running ? "开启 OpenHop 以查找附近的电脑。"
+    : n === 0 ? "正在查找附近的电脑… 在其他电脑上打开 OpenHop。"
+    : st.needs_pairing ? "点击一台电脑以连接。"
+    : "";
+  if (caption) radar.append(el("div", { class: "caption" }, caption));
+}
+window.addEventListener("resize", () => { radarKey = ""; if (snap) renderRadar(); });
+
+// ------------------------------------------------------------------ pairing
+
+let pairing = null; // the discovered server being paired with
+
+function openPair(d) {
+  pairing = { device: d ? d.device : null, name: d ? d.name : null, byAddr: !d, sent: false, peers0: (snap.status?.peers || []).length };
+  $("pairTitle").textContent = d ? `Pair with ${d.name}` : "通过地址连接";
+  $("pairText").textContent = d
+    ? `Enter the 6-digit code shown in OpenHop on ${d.name}.`
+    : "在另一台电脑上，OpenHop 会在「添加电脑」下显示其地址和 6 位配对码。";
+  for (const id of ["addrInput", "addrLabel", "codeLabel"]) $(id).hidden = !!d;
+  $("addrInput").value = snap.config?.server_addr || "";
+  $("pairInput").value = "";
+  $("pairError").textContent = "";
+  $("pairGo").disabled = false;
+  $("pairGo").textContent = d ? "Pair" : "Connect";
+  $("pairSheet").hidden = false;
+  setTimeout(() => (d ? $("pairInput") : $("addrInput")).focus(), 50);
+}
+
+function closePair() {
+  pairing = null;
+  $("pairSheet").hidden = true;
+}
+
+async function submitPair() {
+  const code = $("pairInput").value.replace(/\D/g, "");
+  const addr = $("addrInput").value.trim();
+  if (pairing.byAddr && !addr) {
+    $("pairError").textContent = "输入对方电脑上显示的地址。";
+    return;
+  }
+  if (code.length !== 6) {
+    $("pairError").textContent = "配对码为 6 位数字。";
+    return;
+  }
+  $("pairError").textContent = "";
+  $("pairGo").disabled = true;
+  $("pairGo").textContent = pairing.byAddr ? "Connecting…" : "Pairing…";
+  pairing.sent = true;
+  pairing.at = Date.now();
+  try {
+    if (pairing.byAddr) await invoke("pair_addr", { addr, code });
+    else await invoke("pair", { device: pairing.device, code });
+  } catch (e) {
+    $("pairError").textContent = String(e);
+    $("pairGo").disabled = false;
+    $("pairGo").textContent = pairing.byAddr ? "Connect" : "Pair";
+  }
+}
+
+$("pairCancel").addEventListener("click", closePair);
+$("pairGo").addEventListener("click", submitPair);
+$("byAddr").addEventListener("click", () => openPair(null));
+// Arrange by moving the mouse: push the pointer toward each computer in turn.
+$("learnBtn").addEventListener("click", async () => {
+  try {
+    await invoke("learn_layout");
+    $("stageHint").textContent = "Push the pointer against the edge of this screen on the side where the computer named at the top of the screen stands. Repeat for each one.";
+    clearTimeout(learning);
+    learning = setTimeout(() => { learning = null; renderStatus(); }, 45000);
+  } catch (e) {
+    $("stageHint").textContent = String(e);
+  }
+});
+for (const id of ["pairInput", "addrInput"]) {
+  $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") submitPair(); if (e.key === "Escape") closePair(); });
+}
+$("pairInput").addEventListener("input", () => {
+  const d = $("pairInput").value.replace(/\D/g, "").slice(0, 6);
+  $("pairInput").value = d.length > 3 ? `${d.slice(0, 3)} ${d.slice(3)}` : d;
+});
+
+function renderPairing() {
+  const st = snap.status;
+  const code = st?.pairing_code;
+  $("pairCode").textContent = code ? `${code.slice(0, 3)} ${code.slice(3)}` : "––– –––";
+  const pairedList = st?.paired || [];
+  $("pairedBlock").hidden = !pairedList.length;
+  const box = $("pairedList");
+  box.replaceChildren();
+  for (const p of pairedList) {
+    box.append(el("div", { class: "row" },
+      el("span", { class: "label" }, p.name),
+      el("button", { class: "link", onclick: async () => { await invoke("forget", { device: p.device }); refresh(); } }, "Forget"),
+    ));
+  }
+  const joined = st?.role === "client";
+  const hub = st?.hub || st?.peers?.[0]?.name;
+  $("myAddr").textContent = joined ? (st.peers?.[0]?.addr || "–") : ((st?.addresses || []).join(", ") || "–");
+  $("pairHint").textContent = joined && hub
+    ? `On the new computer, open OpenHop, tap ${hub} in Nearby and type this code.`
+    : "在另一台电脑上打开 OpenHop，在「附近的电脑」中点这台电脑，然后输入这个配对码。";
+  // Follow a pairing attempt in progress.
+  if (pairing?.sent && st) {
+    const done = pairing.byAddr
+      ? (st.peers || []).length > 0 && !st.pairing_with && Date.now() - pairing.at > 800
+      : pairedList.some((p) => p.device === pairing.device);
+    if (done) {
+      closePair();
+    } else if (st.pair_error && !st.pairing_with && Date.now() - pairing.at > 800) {
+      $("pairError").textContent = st.pair_error;
+      $("pairGo").disabled = false;
+      $("pairGo").textContent = pairing.byAddr ? "Connect" : "Pair";
+      pairing.sent = false;
+    }
+  }
+}
+
+// ------------------------------------------------------------------ updates
+
+$("updateBtn").addEventListener("click", async () => { await invoke("update_check"); refresh(); });
+$("installBtn").addEventListener("click", async () => { await invoke("update_install"); refresh(); });
+
+function renderUpdate() {
+  const u = snap.update || {};
+  $("version").textContent = snap.version || "";
+  const row = $("updateRow");
+  const note = $("updateNote");
+  row.hidden = true;
+  note.textContent = "";
+  $("updateBtn").disabled = u.phase === "checking" || u.phase === "downloading" || u.phase === "installing";
+  switch (u.phase) {
+    case "checking": note.textContent = "Checking…"; break;
+    case "current": note.textContent = "You're up to date."; break;
+    case "available":
+      row.hidden = false;
+      $("updateText").textContent = `Version ${u.latest} is available`;
+      $("installBtn").disabled = false;
+      note.textContent = "把所有电脑更新到同一版本。";
+      break;
+    case "downloading":
+      row.hidden = false;
+      $("updateText").textContent = `Downloading ${u.latest || ""}… ${Math.round((u.progress || 0) * 100)}%`;
+      $("installBtn").disabled = true;
+      break;
+    case "installing":
+      row.hidden = false;
+      $("updateText").textContent = "正在安装… OpenHop 将重新启动。";
+      $("installBtn").disabled = true;
+      break;
+    case "error": note.textContent = u.message || "更新失败。"; break;
+  }
+}
+
+function fmtBytes(b) {
+  if (b >= 1 << 30) return (b / (1 << 30)).toFixed(1) + " GB";
+  if (b >= 1 << 20) return (b / (1 << 20)).toFixed(1) + " MB";
+  if (b >= 1 << 10) return Math.round(b / 1024) + " KB";
+  return b + " B";
+}
+
+function renderTransfers() {
+  const items = (snap.status?.transfers || []).slice(-5).reverse();
+  $("transfersBlock").hidden = !items.length;
+  const box = $("transfers");
+  box.replaceChildren();
+  for (const t of items) {
+    const pct = t.total ? Math.min(100, Math.round((t.done / t.total) * 100)) : 100;
+    const state = t.error ? "Failed" : t.finished ? "Done" : `${pct}%`;
+    const bar = el("div", { class: "bar" }, el("span", { style: `width:${t.error ? 100 : pct}%` }));
+    if (t.error) bar.classList.add("err");
+    else if (t.finished) bar.classList.add("ok");
+    box.append(el("div", { class: "item transfer" },
+      el("span", { class: "icon file" }, "⇣"),
+      el("span", { class: "text" },
+        el("b", {}, t.label),
+        el("span", {}, t.error ? t.error : `From ${t.peer} · ${fmtBytes(t.total)}`),
+        bar),
+      el("span", { class: "tag" + (t.finished && !t.error ? " live" : "") }, state),
+    ));
+  }
+}
+
+function render() {
+  if (!snap) return;
+  renderTransfers();
+  renderPairing();
+  renderUpdate();
+  renderRadar();
+  renderBanner();
+  renderStatus();
+  if (!dragging) renderGrid();
+  renderNearby();
+}
+
+async function refresh() {
+  try {
+    snap = await invoke("snapshot");
+  } catch (e) {
+    showBanner(String(e));
+    return;
+  }
+  if (!form) fillForm(snap.config);
+  else {
+    // Instant settings are saved as they change; keep them in step.
+    form.ui_accent = snap.config.ui_accent;
+  }
+  window.OpenHopTheme.apply(null, form.ui_accent, snap.system_dark);
+  if (form && !dirty) {
+    // Pick up layout changes the server made (newly connected computers).
+    form.layout = snap.config.layout;
+  }
+  render();
+}
+
+refresh();
+setInterval(refresh, 800);
+
+// ------------------------------------------------------------------ your computers and Focus
+
+const PC_ICON = {
+  laptop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="11" rx="1.6"/><path d="M2 19h20"/></svg>',
+  desktop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.6"/><path d="M9 20h6M12 16v4"/></svg>',
+};
+let overviewKey = "";
+let focusOn = false;
+
+function gb(bytes) {
+  const g = bytes / 1e9;
+  return g >= 1000 ? `${(g / 1000).toFixed(1)} TB` : `${g >= 10 ? Math.round(g) : g.toFixed(1)} GB`;
+}
+
+async function refreshOverview() {
+  let o;
+  try { o = await invoke("overview"); } catch (_) { return; }
+  if (!o) return;
+  focusOn = o.focus;
+  $("focusBtn").classList.toggle("on", o.focus);
+  $("focusBtn").querySelector("span").textContent = o.focus ? "专注中" : "专注";
+  const key = JSON.stringify(o);
+  if (key === overviewKey) return;
+  overviewKey = key;
+  const box = $("pcs");
+  box.replaceChildren();
+  $("pcsBlock").hidden = (o.computers || []).length < 2;
+  for (const c of o.computers || []) {
+    const st = c.status || {};
+    const here = (o.active || o.me) === c.name;
+    const card = el("div", { class: "pc-card" + (here ? " here" : "") });
+    const top = el("div", { class: "top" });
+    top.innerHTML = st.battery ? PC_ICON.laptop : PC_ICON.desktop;
+    top.append(el("span", {}, c.this ? `${c.name} (this)` : c.name));
+    card.append(top);
+    const line = el("div", { class: "line" }, here ? el("span", { class: "pointer" }, "指针在此") : (st.locked ? "已锁定" : "就绪"));
+    if (st.battery) {
+      const [pct, chg] = st.battery;
+      const cell = el("span", { class: "cell" + (chg ? " chg" : pct <= 20 ? " low" : "") }, el("i", { style: `width:${Math.max(6, pct)}%` }));
+      line.append(el("span", { class: "batt" }, cell, `${pct}%`));
+    }
+    card.append(line);
+    if (st.disk) {
+      const [free, total] = st.disk;
+      card.append(el("div", { class: "disk" }, el("i", { style: `width:${Math.round((1 - free / Math.max(1, total)) * 100)}%` })));
+      card.append(el("small", {}, `${gb(free)} free`));
+    }
+    box.append(card);
+  }
+}
+$("focusBtn").addEventListener("click", async () => {
+  focusOn = !focusOn;
+  $("focusBtn").classList.toggle("on", focusOn);
+  try { await invoke("island_focus", { on: focusOn }); } catch (e) { showBanner(String(e)); }
+  refreshOverview();
+});
+refreshOverview();
+setInterval(refreshOverview, 2000);
+
+// ------------------------------------------------------------------ demo mode
+
+function mockOverview() {
+  return { focus: false, me: "desk-pc", active: "macbook", computers: [
+    { name: "desk-pc", this: true, status: { battery: null, disk: [412e9, 1000e9], locked: false } },
+    { name: "macbook", this: false, status: { battery: [64, true], disk: [128e9, 512e9], locked: false } },
+    { name: "ubuntu-box", this: false, status: { battery: [14, false], disk: [38e9, 256e9], locked: true } },
+  ] };
+}
+
+function mockInvoke() {
+  const cfg = {
+    name: "desk-pc", role: "server", passphrase: "correct horse", port: 24850, server_addr: null, server_name: null,
+    layout: { screens: [{ name: "macbook", x: 1, y: 0 }, { name: "ubuntu-box", x: -1, y: 0 }, { name: "imac", x: 0, y: -1 }] },
+    swap_cmd_ctrl: true, clipboard_sync: true, screen: null, linux_backend: "auto",
+    notifications: true, wake_on_lan: true, macs: {}, last_ips: {}, download_dir: null,
+    transfer_limit_mbps: 50, device_id: "a1", trusted: {}, server_device: null,
+    theme_sync: true, dnd_sync: true, stream_quality: "high",
+    window_drag: true, ui_accent: "blue", open_at_login: true, enabled: true,
+  };
+  let running = true;
+  if (location.search.includes("client")) {
+    Object.assign(cfg, { name: "macbook", role: "client", layout: { screens: [] }, passphrase: "", transfer_limit_mbps: 0, notifications: true, wake_on_lan: true });
+    return async (cmd, args) => {
+      if (cmd === "snapshot") return { config: structuredClone(cfg), os: "MacOs", error: null, permission: null, wayland: false,
+        status: running ? { running: true, role: "client", name: "macbook", os: "MacOs", message: "Connected to desk-pc", error: null,
+          active: "macbook", peers: [{ name: "desk-pc", os: "Windows", addr: "192.168.1.20", screen: { x: 0, y: 0, w: 0, h: 0 } }],
+          discovered: [{ name: "desk-pc", os: "Windows", role: "server", addr: "192.168.1.20:24850", device: "d1", link: "network" },
+                       { name: "studio-pc", os: "Linux", role: "server", addr: "[fe80::1%3]:24850", device: "s9", link: "direct" },
+                       { name: "ubuntu-box", os: "Linux", role: "client", addr: "192.168.1.40:24850", device: "u2", link: "network" }],
+          paired: [{ device: "d1", name: "desk-pc" }], needs_pairing: false, pairing_with: null, pair_error: null, transfers: [],
+          layout: { screens: [] }, screen: { x: 0, y: 0, w: 1512, h: 982 } } : null,
+        version: "0.3.0", update: { phase: "current", current: "0.3.0" } };
+      if (cmd === "stop") running = false;
+      if (cmd === "start") running = true;
+      if (cmd === "save_config") Object.assign(cfg, args.config);
+      return null;
+    };
+  }
+  const status = () => running ? {
+    running: true, role: cfg.role, name: cfg.name, os: "Windows",
+    message: "Sharing with 2 computer(s)", error: null, active: "macbook",
+    peers: [
+      { name: "macbook", os: "MacOs", addr: "192.168.1.31", screen: { x: 0, y: 0, w: 1512, h: 982 } },
+      { name: "ubuntu-box", os: "Linux", addr: "192.168.1.40", screen: { x: 0, y: 0, w: 2560, h: 1440 } },
+    ],
+    discovered: [
+      { name: "macbook", os: "MacOs", role: "client", addr: "192.168.1.31:24850", device: "b2", link: "network" },
+      { name: "ubuntu-box", os: "Linux", role: "client", addr: "169.254.20.2:24850", link: "direct", device: "c3" },
+    ],
+    layout: cfg.layout, screen: { x: 0, y: 0, w: 2560, h: 1440 },
+    wakeable: ["imac"],
+    device: "a1", pairing_code: "485632", needs_pairing: false, pairing_with: null, pair_error: null, addresses: ["192.168.1.20"], port: 24850,
+    paired: [{ device: "b2", name: "macbook" }, { device: "c3", name: "ubuntu-box" }],
+    transfers: [
+      { offer: 1, label: "holiday video.mp4", peer: "macbook", incoming: true, done: 912 * 1048576, total: 1450 * 1048576, finished: false, error: null },
+      { offer: 2, label: "design.psd", peer: "ubuntu-box", incoming: true, done: 48 * 1048576, total: 48 * 1048576, finished: true, error: null },
+    ],
+  } : null;
+  return async (cmd, args) => {
+    switch (cmd) {
+      case "snapshot": return { config: structuredClone(cfg), status: status(), os: "Windows", error: null, permission: null, wayland: false,
+        version: "0.3.0", update: { phase: "available", current: "0.3.0", latest: "0.3.1" } };
+      case "save_config": Object.assign(cfg, args.config); return null;
+      case "set_layout": cfg.layout = args.layout; return null;
+      case "update_prefs": Object.assign(cfg, args.prefs); return null;
+      case "start": running = true; return null;
+      case "stop": running = false; return null;
+      case "overview": return mockOverview();
+      default: return null;
+    }
+  };
+}
+
+// AirDrop (Linux; Windows with a USB adapter).
+const airdropRow = document.getElementById("airdropRow");
+async function renderAirDrop() {
+  if (!airdropRow) return;
+  let s;
+  try { s = await invoke("airdrop_state"); } catch (_) { return; }
+  const always = document.getElementById("airdropAlwaysRow");
+  if (!s || !s.possible) { airdropRow.hidden = true; always.hidden = true; return; }
+  airdropRow.hidden = false;
+  const sub = document.getElementById("airdropSub"), btn = document.getElementById("airdropBtn");
+  btn.hidden = false;
+  always.hidden = !s.installed;
+  if (!s.installed) {
+    if (s.windows) {
+      sub.textContent = "Swap files with iPhones and Macs. Needs a MediaTek MT7612U USB Wi‑Fi adapter (about $20) and a one-time set-up that runs in its own window (20–40 minutes).";
+      btn.textContent = "设置";
+      btn.onclick = () => { btn.textContent = "Opening…"; invoke("airdrop_setup").catch((e) => { sub.textContent = String(e); }).finally(() => setTimeout(renderAirDrop, 3000)); };
+    } else {
+      sub.textContent = s.advice || "与 iPhone 和 Mac 互传文件。";
+      btn.textContent = "设置";
+      btn.onclick = () => { btn.textContent = "Opening…"; invoke("airdrop_setup").catch((e) => { sub.textContent = String(e); }).finally(() => setTimeout(renderAirDrop, 5000)); };
+    }
+    return;
+  }
+  // Set up: sending is in the menus and the island; receiving is the switch
+  // below (or, where being visible takes the computer off Wi‑Fi, a while at a time).
+  const st = s.status || {};
+  always.hidden = s.costs_wifi;
+  btn.hidden = !s.costs_wifi;
+  if (s.costs_wifi) {
+    btn.textContent = st.receiving ? "Stop" : "允许 iPhone 发送到此";
+    btn.onclick = () => { btn.textContent = st.receiving ? "Stopping…" : "正在开启…"; invoke("airdrop_receive", { minutes: st.receiving ? 0 : 10 }).catch((e) => { sub.textContent = String(e); }).finally(() => setTimeout(renderAirDrop, 400)); };
+    if (!st.receiving) { sub.textContent = "This Wi‑Fi card can't stay on Wi‑Fi while visible, so it's visible 10 minutes at a time. To send: drop files on the island and choose AirDrop."; return; }
+  }
+  sub.textContent = st.receiving
+    ? `Visible as “${st.name || "this computer"}”. To send: drop files on the island and choose AirDrop, or right-click › Send with OpenHop › AirDrop.`
+    : (s.missing && s.missing.length) ? "尚未可见：" + s.missing[0]
+    : st.reason ? st.reason : "To send: drop files on the island and choose AirDrop, or right-click › Send with OpenHop › AirDrop.";
+}
+renderAirDrop();
+setInterval(() => { if (!document.hidden) renderAirDrop(); }, 30000);
+
+// The shared folder.
+const openShared = document.getElementById("openShared");
+if (openShared) openShared.addEventListener("click", () => invoke("open_shared_folder").catch(() => {}));
