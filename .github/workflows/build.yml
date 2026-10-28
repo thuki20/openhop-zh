@@ -149,13 +149,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - uses: actions/download-artifact@v4
-        if: steps.ver.outputs.exists == 'false'
         with:
           pattern: OpenHop-*
           path: dist
           merge-multiple: true
+      - name: Remove stale release so assets match the current commit
+        if: steps.ver.outputs.exists == 'true'
+        run: gh release delete "${{ steps.ver.outputs.tag }}" --yes --cleanup-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Publish ${{ steps.ver.outputs.tag }}
-        if: steps.ver.outputs.exists == 'false'
         run: |
           cat > notes.md <<'EOF'
           ## Install
