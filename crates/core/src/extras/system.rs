@@ -111,12 +111,10 @@ pub fn set_dnd(on: bool) {
 pub fn presenting() -> bool {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Shell::SHQueryUserNotificationState;
-        if let Ok(state) = unsafe { SHQueryUserNotificationState() } {
-            // BUSY (full-screen app), RUNNING_D3D_FULL_SCREEN, PRESENTATION_MODE
-            return matches!(state.0, 2 | 3 | 4);
-        }
-        return false;
+        // 系统级全屏/演示状态（SHQueryUserNotificationState）会被 OpenHop 自身遮罩窗口
+        // 干扰：接管鼠标时显示的空白窗口（类名 OpenHopBlank）会让系统报告 QUNS_BUSY(2)，
+        // 进而禁用边缘切换，形成自锁。改为自行枚举真实全屏窗口并排除 OpenHop 自己的遮罩。
+        return windows_real_fullscreen();
     }
     #[cfg(target_os = "linux")]
     {
@@ -124,6 +122,64 @@ pub fn presenting() -> bool {
     }
     #[allow(unreachable_code)]
     false
+}
+
+/// 枚举可见顶层窗口，判断是否存在"真实的全屏应用"。
+/// 刻意排除 OpenHop 自身创建的遮罩窗口（标题 `OpenHop`），避免自锁。
+#[cfg(windows)]
+fn windows_real_fullscreen() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetSystemMetrics, GetWindowRect, GetWindowTextW, IsWindowVisible, SM_CXSCREEN, SM_CYSCREEN,
+    };
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+
+    let cx = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let cy = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+    if cx <= 0 || cy <= 0 {
+        return false;
+    }
+    let mut found = false;
+    let mut scan = FullscreenScan { cx, cy, found: &mut found as *mut bool };
+    unsafe {
+        let _ = EnumWindows(Some(enum_real_fullscreen), LPARAM(&mut scan as *mut _ as isize));
+    }
+    found
+}
+
+#[cfg(windows)]
+struct FullscreenScan {
+    cx: i32,
+    cy: i32,
+    found: *mut bool,
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn enum_real_fullscreen(hwnd: HWND, lparam: LPARAM) -> i32 {
+    let scan = &mut *(lparam.0 as *mut FullscreenScan);
+    if !IsWindowVisible(hwnd).as_bool() {
+        return 1; // 继续枚举
+    }
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect).is_err() {
+        return 1;
+    }
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    // 覆盖主屏 90% 以上才视为全屏
+    if (w as f64) < (scan.cx as f64) * 0.9 || (h as f64) < (scan.cy as f64) * 0.9 {
+        return 1;
+    }
+    // 排除 OpenHop 自身的全屏遮罩窗口（platform/windows.rs 中 create_blank_window 把标题设为 "OpenHop"）
+    let mut buf = [0u16; 256];
+    let n = GetWindowTextW(hwnd, &mut buf);
+    if n > 0 {
+        let title = String::from_utf16_lossy(&buf[..n as usize]);
+        if title == "OpenHop" {
+            return 1;
+        }
+    }
+    *scan.found = true;
+    0
 }
 
 #[cfg(target_os = "linux")]
