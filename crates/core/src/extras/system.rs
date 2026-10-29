@@ -131,7 +131,7 @@ fn windows_real_fullscreen() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetSystemMetrics, GetWindowRect, GetWindowTextW, IsWindowVisible, SM_CXSCREEN, SM_CYSCREEN,
     };
-    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 
     let cx = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let cy = unsafe { GetSystemMetrics(SM_CYSCREEN) };
@@ -154,20 +154,20 @@ struct FullscreenScan {
 }
 
 #[cfg(windows)]
-unsafe extern "system" fn enum_real_fullscreen(hwnd: HWND, lparam: LPARAM) -> i32 {
+unsafe extern "system" fn enum_real_fullscreen(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let scan = &mut *(lparam.0 as *mut FullscreenScan);
     if !IsWindowVisible(hwnd).as_bool() {
-        return 1; // 继续枚举
+        return BOOL(1); // 继续枚举
     }
     let mut rect = RECT::default();
     if GetWindowRect(hwnd, &mut rect).is_err() {
-        return 1;
+        return BOOL(1);
     }
     let w = rect.right - rect.left;
     let h = rect.bottom - rect.top;
     // 覆盖主屏 90% 以上才视为全屏
     if (w as f64) < (scan.cx as f64) * 0.9 || (h as f64) < (scan.cy as f64) * 0.9 {
-        return 1;
+        return BOOL(1);
     }
     // 排除 OpenHop 自身的全屏遮罩窗口（platform/windows.rs 中 create_blank_window 把标题设为 "OpenHop"）
     let mut buf = [0u16; 256];
@@ -175,11 +175,11 @@ unsafe extern "system" fn enum_real_fullscreen(hwnd: HWND, lparam: LPARAM) -> i3
     if n > 0 {
         let title = String::from_utf16_lossy(&buf[..n as usize]);
         if title == "OpenHop" {
-            return 1;
+            return BOOL(1);
         }
     }
     *scan.found = true;
-    0
+    BOOL(0)
 }
 
 #[cfg(target_os = "linux")]
