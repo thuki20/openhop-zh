@@ -113,8 +113,9 @@ pub fn presenting() -> bool {
     {
         // 系统级全屏/演示状态（SHQueryUserNotificationState）会被 OpenHop 自身遮罩窗口
         // 干扰：接管鼠标时显示的空白窗口（标题 "OpenHop"、类名 OpenHopBlank）会让系统报告
-        // QUNS_BUSY(2)，进而禁用边缘切换，形成自锁。改为自行枚举真实全屏窗口并排除 OpenHop
-        // 自己的遮罩（按窗口标题 "OpenHop" 排除，故下方枚举不会把它误判为全屏应用）。
+        // QUNS_BUSY(2)，进而禁用边缘切换，形成自锁。
+        // 替代方案见 windows_real_fullscreen()：只检查【前台窗口】并排除桌面/任务栏/OpenHop
+        // 遮罩，避免误判成全屏锁死切换。
         return windows_real_fullscreen();
     }
     #[cfg(target_os = "linux")]
@@ -125,10 +126,20 @@ pub fn presenting() -> bool {
     false
 }
 
-/// 枚举可见顶层窗口，判断是否存在"真实的全屏应用"。
-/// 刻意排除 OpenHop 自身创建的遮罩窗口（标题 `OpenHop`），避免自锁。
-/// 注意：这里必须用全路径（windows_core::BOOL / windows::Win32::...::Xxx）而不是 `use` 导入，
-/// 因为 windows 0.62 对这些项的 re-export 在 `use` 语句下存在解析怪癖（编译期 not found）。
+/// 判断 Windows 上是否有"真实的全屏应用"正在【前台】运行（游戏 / 全屏视频等）。
+///
+/// 设计要点（踩坑记录）：
+/// - 不能遍历所有顶层窗口（EnumWindows）来判全屏——桌面窗口 Progman/WorkerW
+///   本就是永远可见、铺满全屏的顶层窗口，会被误判成"全屏"，导致 presenting()
+///   几乎永远返回 true，进而锁死所有跨屏边缘切换（鼠标切不出去 / 切过去回不来）。
+///   这正是 b592b7a 那版引入的回归。
+/// - 也不能依赖 SHQueryUserNotificationState：OpenHop 接管鼠标时创建的 1x1 置顶
+///   遮罩窗口（标题 "OpenHop"）会让系统报告 QUNS_BUSY(2)，同样自锁。
+/// - 正确做法：只看【前台窗口】，覆盖主屏 >=90% 才算全屏，并排除 shell/桌面窗口
+///   （Progman/WorkerW）、任务栏（Shell_TrayWnd）以及 OpenHop 自己的遮罩（标题 "OpenHop"）。
+///
+/// 所有 Win32 调用统一用全路径（windows::Win32::...::Xxx），规避 windows 0.62.2
+/// 下 `use` 导入的解析怪癖（编译期 not found）。
 #[cfg(windows)]
 fn windows_real_fullscreen() -> bool {
     let cx = unsafe {
@@ -144,58 +155,44 @@ fn windows_real_fullscreen() -> bool {
     if cx <= 0 || cy <= 0 {
         return false;
     }
-    let mut found = false;
-    let mut scan = FullscreenScan {
-        cx,
-        cy,
-        found: &mut found as *mut bool,
-    };
     unsafe {
-        let _ = windows::Win32::UI::WindowsAndMessaging::EnumWindows(
-            Some(enum_real_fullscreen),
-            windows::Win32::Foundation::LPARAM(&mut scan as *mut _ as isize),
-        );
-    }
-    found
-}
-
-#[cfg(windows)]
-struct FullscreenScan {
-    cx: i32,
-    cy: i32,
-    found: *mut bool,
-}
-
-#[cfg(windows)]
-unsafe extern "system" fn enum_real_fullscreen(
-    hwnd: windows::Win32::Foundation::HWND,
-    lparam: windows::Win32::Foundation::LPARAM,
-) -> windows_core::BOOL {
-    let scan = &mut *(lparam.0 as *mut FullscreenScan);
-    if !windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool() {
-        return windows_core::BOOL(1);
-    }
-    let mut rect = windows::Win32::Foundation::RECT::default();
-    if windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect).is_err() {
-        return windows_core::BOOL(1);
-    }
-    let w = rect.right - rect.left;
-    let h = rect.bottom - rect.top;
-    // 覆盖主屏 90% 以上才视为全屏
-    if (w as f64) < (scan.cx as f64) * 0.9 || (h as f64) < (scan.cy as f64) * 0.9 {
-        return windows_core::BOOL(1);
-    }
-    // 排除 OpenHop 自身的全屏遮罩窗口（platform/windows.rs 中 create_blank_window 把标题设为 "OpenHop"）
-    let mut buf = [0u16; 256];
-    let n = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut buf);
-    if n > 0 {
-        let title = String::from_utf16_lossy(&buf[..n as usize]);
-        if title == "OpenHop" {
-            return windows_core::BOOL(1);
+        let fg = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+        if fg.0.is_null() {
+            return false;
         }
+        // 排除 shell / 桌面窗口：它永远可见且铺满全屏，是 EnumWindows 方案的误判源。
+        let shell = windows::Win32::UI::WindowsAndMessaging::GetShellWindow();
+        if fg.0 == shell.0 {
+            return false;
+        }
+        // 按类名排除桌面渲染层 / 任务栏等 shell 自有窗口（部分系统前台会是 WorkerW 而非 Progman）。
+        let mut cls = [0u16; 256];
+        let cn = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(fg, &mut cls);
+        if cn > 0 {
+            let class = String::from_utf16_lossy(&cls[..cn as usize]);
+            if class == "Progman" || class == "WorkerW" || class == "Shell_TrayWnd" || class == "DV2ControlHost" {
+                return false;
+            }
+        }
+        // 排除 OpenHop 自己的全屏遮罩窗口（platform/windows.rs 中 create_blank_window
+        // 把标题设为 "OpenHop"），避免接管鼠标时自锁。
+        let mut title = [0u16; 256];
+        let tn = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(fg, &mut title);
+        if tn > 0 {
+            let t = String::from_utf16_lossy(&title[..tn as usize]);
+            if t == "OpenHop" {
+                return false;
+            }
+        }
+        // 前台窗口必须覆盖主屏 >=90% 才算"真实全屏"。
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        if windows::Win32::UI::WindowsAndMessaging::GetWindowRect(fg, &mut rect).is_err() {
+            return false;
+        }
+        let w = rect.right - rect.left;
+        let h = rect.bottom - rect.top;
+        (w as f64) >= (cx as f64) * 0.9 && (h as f64) >= (cy as f64) * 0.9
     }
-    *scan.found = true;
-    windows_core::BOOL(0)
 }
 
 #[cfg(target_os = "linux")]
