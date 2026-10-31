@@ -1492,9 +1492,10 @@ impl Server {
                 if neighbor.is_none() && self.learning.is_empty() {
                     return;
                 }
-                // Corners never hop; a full-screen game or video keeps the
-                // pointer; and the pointer rests a moment against the edge.
-                if self.pinned || !(CORNER..=1.0 - CORNER).contains(&frac) || self.ctx.hub.fullscreen("") {
+                // Corners never hop; and the pointer rests a moment against
+                // the edge. (A full-screen app no longer traps the pointer —
+                // switching is allowed even during a full-screen game/video.)
+                if self.pinned || !(CORNER..=1.0 - CORNER).contains(&frac) {
                     self.edge_wait = None;
                     return;
                 }
@@ -1542,13 +1543,13 @@ impl Server {
                     }
                     Err((side, frac)) => {
                         // Hop only after pushing a little past the edge, never
-                        // from a corner, a pinned screen or a full-screen game.
+                        // from a corner or a pinned screen.
                         let over = match side {
                             Side::Left | Side::Right => dx.abs(),
                             Side::Top | Side::Bottom => dy.abs(),
                         };
                         self.push += over;
-                        let blocked = self.pinned || !(CORNER..=1.0 - CORNER).contains(&frac) || self.ctx.hub.fullscreen(&pname) || self.push < EDGE_PUSH;
+                        let blocked = self.pinned || !(CORNER..=1.0 - CORNER).contains(&frac) || self.push < EDGE_PUSH;
                         if !blocked {
                             self.push = 0;
                         }
@@ -2091,8 +2092,7 @@ impl Server {
                             Side::Left | Side::Right => dx.abs(),
                             Side::Top | Side::Bottom => dy.abs(),
                         };
-                        let full = if a == THIS { self.ctx.hub.fullscreen("") } else { self.ctx.hub.fullscreen(&name) };
-                        let blocked = self.pinned || !(CORNER..=1.0 - CORNER).contains(&frac) || full || self.push < EDGE_PUSH;
+                        let blocked = self.pinned || !(CORNER..=1.0 - CORNER).contains(&frac) || self.push < EDGE_PUSH;
                         if !blocked {
                             self.push = 0;
                         }
@@ -3255,9 +3255,9 @@ impl Client {
                 match touching_edge_mon(&screen, &platform::monitors(), x, y) {
                     Some(side) => {
                         let frac = edge_fraction(&screen, side, x, y);
-                        // Not from corners, a pinned pointer or a full-screen game;
+                        // Not from corners or a pinned pointer;
                         // after resting a moment against the edge.
-                        if self.pinned || !(CORNER..=1.0 - CORNER).contains(&frac) || self.ctx.hub.fullscreen("") {
+                        if self.pinned || !(CORNER..=1.0 - CORNER).contains(&frac) {
                             self.edge_wait = None;
                         } else if self.edge_wait.map(|(s, _)| s != side).unwrap_or(true) {
                             self.edge_wait = Some((side, Instant::now()));
