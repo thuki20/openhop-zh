@@ -286,7 +286,19 @@ fn place(handle: &AppHandle, w: f64, h: f64) {
         let raw = win.hwnd().map(|h| h.0 as isize).unwrap_or(0);
         #[cfg(not(windows))]
         let raw = 0isize;
-        if !openhop_core::extras::lane::move_resize(raw, ISLAND_TITLE, x, top, pw, ph) {
+        let lane_ok = openhop_core::extras::lane::move_resize(raw, ISLAND_TITLE, x, top, pw, ph);
+        // Linux: the island window IS the lane, already sized by move_resize, so
+        // don't also resize it via Tauri. macOS: move_resize is a no-op, so the
+        // `if` below resizes the webview. Windows: move_resize only repositions
+        // the app-bar lane via SetWindowPos and never resizes the webview, so the
+        // webview stays at its pill size and the 520px Control-Center panel gets
+        // clipped by `overflow:hidden`; resize the webview explicitly here.
+        if !lane_ok {
+            let _ = win.set_size(PhysicalSize::new(pw, ph));
+            let _ = win.set_position(PhysicalPosition::new(x, top));
+        }
+        #[cfg(windows)]
+        {
             let _ = win.set_size(PhysicalSize::new(pw, ph));
             let _ = win.set_position(PhysicalPosition::new(x, top));
         }
